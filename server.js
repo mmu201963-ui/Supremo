@@ -3,8 +3,6 @@ const WebSocket = require('ws');
 
 const PORT = Number(process.env.PORT || 3000);
 const START = Number(process.env.PAPER_START_CAPITAL || 10000);
-const SCAN_MS = Math.max(100, Number(process.env.SCAN_MS || 250));
-const COOLDOWN_MS = Number(process.env.COOLDOWN_MS || 300000);
 const FEE = Number(process.env.FEE_RATE || 0.0004);
 const SLIP = Number(process.env.SLIPPAGE_RATE || 0.0002);
 const MAX_POS = Number(process.env.MAX_POSITIONS || 12);
@@ -14,20 +12,15 @@ const LEV = Number(process.env.LEVERAGE || 5);
 const TP = Number(process.env.PAPER_TP || 0.006);
 const SL = Number(process.env.PAPER_SL || 0.004);
 const HOLD = Number(process.env.PAPER_MAX_HOLD_MS || 900000);
-const MIN_EDGE = Number(process.env.MIN_EDGE || 0.00065);
 const FEED_TIMEOUT = Number(process.env.FEED_TIMEOUT_MS || 8000);
-const WARMUP_MS = Number(process.env.WARMUP_MS || 8000);
-const CANDIDATE_POOL = Number(process.env.CANDIDATE_POOL || 40);
-const HISTORY_MS = 60000;
+const CANDLE_MS = 30000; // 30-second candle: the only entry signal.
 
 const now = () => Date.now();
-const pct = (a, b) => b ? (a / b - 1) * 100 : 0;
-const clamp = (x, lo, hi) => Math.max(lo, Math.min(hi, x));
 
 let symbols = new Map();
 let ticks = new Map();
-let hist = new Map();
-let cool = new Map();
+let candles = new Map();
+let lastEntryCandle = new Map();
 let pos = new Map();
 let trades = [];
 let equity = START;
@@ -39,24 +32,22 @@ let feedSince = 0;
 let lastMessageAt = 0;
 let lastDataAt = 0;
 let lastScanMs = 0;
-let lastScanAt = 0;
-let topSignals = [];
 let errors = 0;
 let reconnects = 0;
 let ws = null;
 let wsGeneration = 0;
 let universeLoadedAt = 0;
 let universeSource = 'NONE';
-let feedFallbacks = 0;
 let firstDataAt = 0;
 let dataMessages = 0;
 let dataUpdates = 0;
 let symbolsUpdatedThisCycle = 0;
 let peakEquity = START;
 let maxDrawdown = 0;
+let entries = 0;
 
 async function getJSON(url) {
-  const r = await fetch(url, { headers: { 'User-Agent': 'SUPREMO/2.0' } });
+  const r = await fetch(url, { headers: { 'User-Agent': 'SUPREMO/6.0' } });
   if (!r.ok) throw Error(r.status + ' ' + url);
   return r.json();
 }
@@ -72,72 +63,83 @@ async function universe() {
   universeLoadedAt = now();
   universeSource = 'REST_EXCHANGE_INFO';
   console.log(`UNIVERSE_READY=${symbols.size}`);
-  return symbols.size;
+}
+
+function updateCandle(s, price, ts) {
+  const bucket = Math.floor(ts / CANDLE_MS) * CANDLE_MS;
+  let c = candles.get(s);
+  if (!c || c.start !== bucket) {
+    c = { start: bucket, open: price, high: price, low: price, close: price, ticks: 1 };
+    candles.set(s, c);
+  } else {
+    c.high = Math.max(c.high, price);
+    c.low = Math.min(c.low, price);
+    c.close = price;
+    c.ticks++;
+  }
 }
 
 function tick(s, p, v, ts) {
-  if (!(p > 0) || !symbols.has(s)) return;
-  ticks.set(s, { price: p, volume: v, ts });
-  let h = hist.get(s);
-  if (!h) hist.set(s, h = []);
-  h.push({ ts, price: p });
-  while (h.length && ts - h[0].ts > HISTORY_MS) h.shift();
+  if (!(p > 0)) return;
+  if (!symbols.has(s) && s.endsWith('USDT')) {
+    symbols.set(s, { symbol:s, status:'TRADING', quoteAsset:'USDT', contractType:'PERPETUAL' });
+    if (!universeLoadedAt) universeLoadedAt = now();
+    if (universeSource === 'NONE') universeSource = 'LIVE_STREAM_DISCOVERY';
+  }
+  if (!symbols.has(s)) return;
+  ticks.set(s, { price:p, volume:v, ts });
+  updateCandle(s, p, ts);
   dataUpdates++;
   lastDataAt = ts;
   if (!firstDataAt) firstDataAt = ts;
 }
 
-function feature(s) {
-  const t = ticks.get(s), h = hist.get(s) || [];
-  if (!t || h.length < 3) return null;
-  const p = t.price, ts = t.ts;
-  const ret = (w) => {
-    for (let i = h.length - 1; i >= 0; i--) {
-      if (ts - h[i].ts >= w) return (p / h[i].price - 1);
-    }
-    return null;
+function candleSignal(s) {
+  const c = candles.get(s);
+  if (!c || c.ticks < 2 || c.close === c.open) return null;
+  return {
+    symbol:s,
+    side:c.close > c.open ? 'LONG' : 'SHORT',
+    candleStart:c.start,
+    open:c.open,
+    close:c.close,
+    high:c.high,
+    low:c.low,
+    bodyPct:(c.close / c.open - 1) * 100,
+    ticks:c.ticks
   };
-  const r1 = ret(1000), r2 = ret(2000), r5 = ret(5000), r15 = ret(15000);
-  if ([r1, r2, r5, r15].some(x => x === null)) return null;
-  const velocity = r2 / 2;
-  const acceleration = r1 - r2 / 2;
-  const persistence = r5 / 5;
-  const exhaustion = Math.max(0, Math.abs(r15) - 0.015) * Math.sign(r15 || 0);
-  const score = 0.40 * velocity + 0.30 * acceleration + 0.30 * persistence - 0.15 * exhaustion;
-  const direction = score >= 0 ? 'LONG' : 'SHORT';
-  const grossPotential = Math.abs(score) * 100;
-  const estimatedRoundTripCost = (FEE + SLIP) * 2;
-  const edge = Math.abs(score) - estimatedRoundTripCost;
-  return { symbol:s, price:p, ts, r1:r1*100, r2:r2*100, r5:r5*100, r15:r15*100, velocity, acceleration, persistence, score, direction, grossPotential, estimatedRoundTripCost, edge };
 }
 
 function counts() {
-  let l = 0, s = 0;
+  let l=0,s=0;
   for (const p of pos.values()) p.side === 'LONG' ? l++ : s++;
-  return { l, s };
+  return {l,s};
 }
 
-function canOpen(f) {
-  if (!f || !feedHealthy() || pos.has(f.symbol)) return false;
-  const c = cool.get(f.symbol);
-  if (c && now() < c) return false;
-  if (now() - feedSince < WARMUP_MS) return false;
-  const n = counts();
-  return pos.size < MAX_POS && f.edge >= MIN_EDGE &&
-    !(f.direction === 'LONG' && n.l >= MAX_SIDE) &&
-    !(f.direction === 'SHORT' && n.s >= MAX_SIDE);
+function feedHealthy() {
+  return connected && ticks.size > 0 && lastDataAt > 0 && now() - lastDataAt < FEED_TIMEOUT;
 }
 
-function openPosition(f) {
-  pos.set(f.symbol, {
-    symbol: f.symbol,
-    side: f.direction,
-    entry: f.price,
-    openedAt: now(),
-    margin: MARGIN,
-    signalScore: f.score,
-    edge: f.edge
+function openPosition(signal, price) {
+  if (pos.has(signal.symbol) || pos.size >= MAX_POS) return false;
+  const c = counts();
+  if (signal.side === 'LONG' && c.l >= MAX_SIDE) return false;
+  if (signal.side === 'SHORT' && c.s >= MAX_SIDE) return false;
+  if (lastEntryCandle.get(signal.symbol) === signal.candleStart) return false;
+
+  pos.set(signal.symbol, {
+    symbol:signal.symbol,
+    side:signal.side,
+    entry:price,
+    openedAt:now(),
+    margin:MARGIN,
+    candleStart:signal.candleStart,
+    candleOpen:signal.open,
+    signalBodyPct:signal.bodyPct
   });
+  lastEntryCandle.set(signal.symbol, signal.candleStart);
+  entries++;
+  return true;
 }
 
 function closePosition(p, price, reason) {
@@ -151,9 +153,8 @@ function closePosition(p, price, reason) {
   equity = START + realized;
   peakEquity = Math.max(peakEquity, equity);
   maxDrawdown = Math.max(maxDrawdown, peakEquity - equity);
-  trades.push({ symbol:p.symbol, side:p.side, entry:p.entry, exit:price, net, reason, heldMs:now()-p.openedAt, score:p.signalScore });
+  trades.push({ symbol:p.symbol, side:p.side, entry:p.entry, exit:price, net, reason, heldMs:now()-p.openedAt, candleStart:p.candleStart });
   if (trades.length > 1000) trades.shift();
-  cool.set(p.symbol, now() + COOLDOWN_MS);
   pos.delete(p.symbol);
 }
 
@@ -163,180 +164,93 @@ function manage() {
     if (!t) continue;
     const d = p.side === 'LONG' ? 1 : -1;
     const move = (t.price / p.entry - 1) * d;
+    const c = candles.get(p.symbol);
+    const candleReversed = c && c.close !== c.open && ((p.side === 'LONG' && c.close < c.open) || (p.side === 'SHORT' && c.close > c.open));
     if (move >= TP) closePosition(p, t.price, 'TP');
     else if (move <= -SL) closePosition(p, t.price, 'SL');
+    else if (candleReversed && c.start > p.candleStart) closePosition(p, t.price, 'CANDLE_REVERSAL');
     else if (now() - p.openedAt >= HOLD) closePosition(p, t.price, 'TIME');
   }
-}
-
-function feedHealthy() {
-  const age = lastDataAt ? now() - lastDataAt : Infinity;
-  return connected && ticks.size > 0 && age < FEED_TIMEOUT;
 }
 
 function scan() {
   const st = performance.now();
   scanNo++;
   manage();
-  const a = [];
-  let updated = 0;
-  for (const s of symbols.keys()) {
-    if (ticks.has(s)) updated++;
-    const f = feature(s);
-    if (f) a.push(f);
-  }
-  symbolsUpdatedThisCycle = updated;
-  a.sort((x,y) => Math.abs(y.edge) - Math.abs(x.edge));
-  topSignals = a.slice(0, 30);
-  if (feedHealthy() && now() - feedSince >= WARMUP_MS) {
-    // Rotate through the best eligible candidates instead of repeatedly taking the first symbol.
-    const candidates = a.filter(canOpen).slice(0, CANDIDATE_POOL);
-    if (candidates.length) {
-      candidates.sort((x,y) => (y.edge - x.edge) || (Math.abs(y.score)-Math.abs(x.score)));
-      const chosen = candidates[scanNo % Math.min(3, candidates.length)];
-      openPosition(chosen);
+  let updated=0;
+  for (const s of symbols.keys()) if (ticks.has(s)) updated++;
+  symbolsUpdatedThisCycle=updated;
+
+  if (feedHealthy()) {
+    // ENTRY RULE: ONLY THE CURRENT 30-SECOND CANDLE DIRECTION.
+    // Green candle = LONG. Red candle = SHORT. No score, momentum, RSI,
+    // trend thresholds or edge variables are used for the entry decision.
+    for (const [s, t] of ticks) {
+      if (pos.size >= MAX_POS) break;
+      const signal = candleSignal(s);
+      if (signal) openPosition(signal, t.price);
     }
   }
   lastScanMs = performance.now() - st;
-  lastScanAt = now();
 }
 
 function state() {
-  let u = 0;
+  let u=0;
   for (const p of pos.values()) {
-    const t = ticks.get(p.symbol);
+    const t=ticks.get(p.symbol);
     if (t) {
-      const d = p.side === 'LONG' ? 1 : -1;
-      u += p.margin * ((t.price / p.entry - 1) * d) * LEV;
+      const d=p.side==='LONG'?1:-1;
+      u += p.margin*((t.price/p.entry-1)*d)*LEV;
     }
   }
-  const liveEq = equity + u;
-  const coverage = symbols.size ? ticks.size / symbols.size : 0;
+  const liveEq=equity+u;
+  const coverage=symbols.size?ticks.size/symbols.size:0;
+  const candleRows=[];
+  for (const [s,c] of candles) {
+    if (c.ticks < 2 || c.close===c.open) continue;
+    candleRows.push({symbol:s, side:c.close>c.open?'LONG':'SHORT', bodyPct:(c.close/c.open-1)*100, open:c.open, close:c.close, ticks:c.ticks});
+  }
+  candleRows.sort((a,b)=>Math.abs(b.bodyPct)-Math.abs(a.bodyPct));
   return {
-    name:'SUPREMO', version:'4.0', mode:'PAPER', markets:symbols.size,
-    ticks:ticks.size, coverage:+coverage.toFixed(4), coveragePct:+(coverage*100).toFixed(1),
-    scanNo, lastScanMs:+lastScanMs.toFixed(3), lastScanAt,
-    connected, feedMode, feedHealthy:feedHealthy(), feedAgeMs:lastDataAt ? now()-lastDataAt : null,
-    feedSince, lastMessageAt, dataMessages, dataUpdates, symbolsUpdatedThisCycle,
-    equity:+liveEq.toFixed(2), realized:+realized.toFixed(2), unrealized:+u.toFixed(2),
-    positions:[...pos.values()], trades:trades.slice(-50).reverse(), topSignals,
-    cooldowns:[...cool.values()].filter(x=>x>now()).length, errors, reconnects,
-    maxDrawdown:+maxDrawdown.toFixed(2), universeLoadedAt, universeSource, feedFallbacks, firstDataAt
+    name:'SUPREMO',version:'7.0',mode:'PAPER',entryRule:'30S_CANDLE_DIRECTION_ONLY',markets:symbols.size,ticks:ticks.size,
+    coverage:+coverage.toFixed(4),coveragePct:+(coverage*100).toFixed(1),scanNo,lastScanMs:+lastScanMs.toFixed(3),connected,feedMode,
+    feedHealthy:feedHealthy(),feedAgeMs:lastDataAt?now()-lastDataAt:null,dataMessages,dataUpdates,symbolsUpdatedThisCycle,
+    equity:+liveEq.toFixed(2),realized:+realized.toFixed(2),unrealized:+u.toFixed(2),positions:[...pos.values()],trades:trades.slice(-50).reverse(),
+    candleSignals:candleRows.slice(0,40),entries,errors,reconnects,maxDrawdown:+maxDrawdown.toFixed(2),universeSource,universeLoadedAt,firstDataAt
   };
 }
 
-const page = `<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SUPREMO V4 — Global Low-Latency Profit Engine PAPER</title><style>body{font-family:Arial;background:#070b11;color:#eaf0f8;padding:18px;margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.c,.p{background:#111a25;border:1px solid #263448;border-radius:12px;padding:14px;margin-bottom:12px}.b{font-size:24px;font-weight:bold;margin-top:4px}.m{color:#92a1b6;font-size:12px;line-height:1.5}.ok{color:#55e6a5}.bad{color:#ff7184}.warn{color:#ffd166}table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:7px;border-bottom:1px solid #223044;text-align:right}td:first-child,th:first-child{text-align:left}.scroll{overflow:auto;max-height:430px}.pill{display:inline-block;padding:4px 8px;border-radius:10px;background:#172335;margin:3px;font-size:11px}</style></head><body><h2>SUPREMO V4 — GLOBAL LOW-LATENCY PROFIT ENGINE</h2><div class=m>Binance USD-M público · PAPER · sin API keys · sin órdenes reales</div><div id=status class="p warn">Inicializando feed...</div><div class=grid><div class=c>Mercados<div id=m class=b>—</div></div><div class=c>Datos<div id=t class=b>—</div><div id=cov class=m>—</div></div><div class=c>Scan #<div id=n class=b>—</div></div><div class=c>Scan ms<div id=ms class=b>—</div></div><div class=c>Equity<div id=e class=b>—</div></div><div class=c>PnL<div id=p class=b>—</div></div><div class=c>Posiciones<div id=o class=b>—</div></div><div class=c>Feed<div id=w class=b>—</div></div></div><div class=p><b>RADAR / TOP EDGE</b><div class=m>Ranking rápido: velocidad + aceleración + persistencia − agotamiento. Entrada solo si el edge estimado supera costes mínimos y el feed está sano.</div><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>EDGE</th><th>SCORE</th><th>1s%</th><th>2s%</th><th>5s%</th><th>15s%</th></tr></thead><tbody id=s></tbody></table></div></div><div class=p><b>TRADES PAPER</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>NETO</th><th>MOTIVO</th><th>TIEMPO</th></tr></thead><tbody id=r></tbody></table></div></div><div class=p><b>DIAGNÓSTICO</b><div id=d class=m>—</div></div><script>const $=id=>document.getElementById(id);async function u(){try{const x=await fetch('/api/state',{cache:'no-store'}).then(r=>r.json());$('m').textContent=x.markets;$('t').textContent=x.ticks;$('cov').textContent=x.coveragePct+'% cobertura real';$('n').textContent=x.scanNo;$('ms').textContent=x.lastScanMs;$('e').textContent='$'+x.equity.toFixed(2);$('p').textContent='$'+x.realized.toFixed(2);$('o').textContent=x.positions.length;$('w').textContent=x.feedHealthy?'OK':'WAIT';$('w').className='b '+(x.feedHealthy?'ok':'bad');$('status').className='p '+(x.feedHealthy?'ok':'warn');$('status').textContent=x.feedHealthy?('FEED OK · '+x.ticks+'/'+x.markets+' mercados con datos · '+x.feedMode):('ESPERANDO FEED · WS '+(x.connected?'conectado':'desconectado')+' · datos '+x.ticks+'/'+x.markets);$('s').innerHTML=x.topSignals.map(a=>'<tr><td>'+a.symbol+'</td><td class='+(a.direction==='LONG'?'ok':'bad')+'>'+a.direction+'</td><td>'+a.edge.toFixed(5)+'</td><td>'+a.score.toFixed(5)+'</td><td>'+a.r1.toFixed(3)+'</td><td>'+a.r2.toFixed(3)+'</td><td>'+a.r5.toFixed(3)+'</td><td>'+a.r15.toFixed(3)+'</td></tr>').join('');$('r').innerHTML=x.trades.map(a=>'<tr><td>'+a.symbol+'</td><td>'+a.side+'</td><td class='+(a.net>=0?'ok':'bad')+'>'+a.net.toFixed(2)+'</td><td>'+a.reason+'</td><td>'+Math.round(a.heldMs/1000)+'s</td></tr>').join('');$('d').innerHTML='mensajes='+x.dataMessages+' · updates='+x.dataUpdates+' · actualizados/ciclo='+x.symbolsUpdatedThisCycle+' · edad feed='+(x.feedAgeMs??'-')+'ms · reconexiones='+x.reconnects+' · errores='+x.errors+' · reconexiones='+x.reconnects+' · fuente='+x.universeSource+' · drawdown máx=$'+x.maxDrawdown.toFixed(2)}catch(e){$('status').textContent='ERROR UI: '+e.message}}setInterval(u,500);u()</script></body></html>`;
+const page=`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SUPREMO V7 — 30s Candle Trend PAPER</title><style>body{font-family:Arial;background:#070b11;color:#eaf0f8;padding:18px;margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.c,.p{background:#111a25;border:1px solid #263448;border-radius:12px;padding:14px;margin-bottom:12px}.b{font-size:24px;font-weight:bold;margin-top:4px}.m{color:#92a1b6;font-size:12px;line-height:1.5}.ok{color:#55e6a5}.bad{color:#ff7184}.warn{color:#ffd166}table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:7px;border-bottom:1px solid #223044;text-align:right}td:first-child,th:first-child{text-align:left}.scroll{overflow:auto;max-height:430px}</style></head><body><h2>SUPREMO V7 — 30s CANDLE TREND ENGINE</h2><div class=m>Binance USD-M público · PAPER · sin API keys · sin órdenes reales</div><div id=status class="p warn">Inicializando feed...</div><div class=grid><div class=c>Mercados<div id=m class=b>—</div></div><div class=c>Datos<div id=t class=b>—</div><div id=cov class=m>—</div></div><div class=c>Scan #<div id=n class=b>—</div></div><div class=c>Equity<div id=e class=b>—</div></div><div class=c>PnL<div id=p class=b>—</div></div><div class=c>Posiciones<div id=o class=b>—</div></div><div class=c>Entradas<div id=en class=b>—</div></div><div class=c>Feed<div id=w class=b>—</div></div></div><div class=p><b>REGLA DE ENTRADA</b><div class=m>ÚNICA SEÑAL: vela de 30 segundos. Vela verde = LONG. Vela roja = SHORT. Sin score, RSI, momentum, edge ni filtros de tendencia.</div></div><div class=p><b>VELAS ACTIVAS</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>CUERPO %</th><th>OPEN</th><th>CLOSE</th><th>TICKS</th></tr></thead><tbody id=s></tbody></table></div></div><div class=p><b>TRADES PAPER</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>NETO</th><th>MOTIVO</th><th>TIEMPO</th></tr></thead><tbody id=r></tbody></table></div></div><div class=p><b>DIAGNÓSTICO</b><div id=d class=m>—</div></div><script>const $=id=>document.getElementById(id);async function u(){try{const x=await fetch('/api/state',{cache:'no-store'}).then(r=>r.json());$('m').textContent=x.markets;$('t').textContent=x.ticks;$('cov').textContent=x.coveragePct+'% cobertura real';$('n').textContent=x.scanNo;$('e').textContent='$'+x.equity.toFixed(2);$('p').textContent='$'+x.realized.toFixed(2);$('o').textContent=x.positions.length;$('en').textContent=x.entries;$('w').textContent=x.feedHealthy?'OK':'WAIT';$('w').className='b '+(x.feedHealthy?'ok':'bad');$('status').className='p '+(x.feedHealthy?'ok':'warn');$('status').textContent=x.feedHealthy?('FEED OK · '+x.ticks+'/'+x.markets+' mercados con datos · '+x.feedMode):('ESPERANDO FEED · WS '+(x.connected?'conectado':'desconectado')+' · datos '+x.ticks+'/'+x.markets);$('s').innerHTML=x.candleSignals.map(a=>'<tr><td>'+a.symbol+'</td><td class='+(a.side==='LONG'?'ok':'bad')+'>'+a.side+'</td><td>'+a.bodyPct.toFixed(4)+'</td><td>'+a.open+'</td><td>'+a.close+'</td><td>'+a.ticks+'</td></tr>').join('');$('r').innerHTML=x.trades.map(a=>'<tr><td>'+a.symbol+'</td><td>'+a.side+'</td><td class='+(a.net>=0?'ok':'bad')+'>'+a.net.toFixed(2)+'</td><td>'+a.reason+'</td><td>'+Math.round(a.heldMs/1000)+'s</td></tr>').join('');$('d').textContent='updates='+x.dataUpdates+' · actualizados/ciclo='+x.symbolsUpdatedThisCycle+' · edad feed='+(x.feedAgeMs??'-')+'ms · reconexiones='+x.reconnects+' · errores='+x.errors+' · fuente='+x.universeSource+' · drawdown máx=$'+x.maxDrawdown.toFixed(2)}catch(e){$('status').textContent='ERROR UI: '+e.message}}setInterval(u,500);u()</script></body></html>`;
 
-const srv = http.createServer((q,r) => {
-  if (q.url === '/api/state') {
-    r.writeHead(200, {'content-type':'application/json','cache-control':'no-store'});
-    return r.end(JSON.stringify(state()));
-  }
-  r.writeHead(200, {'content-type':'text/html;charset=utf-8','cache-control':'no-store'});
-  r.end(page);
-});
+const srv=http.createServer((q,r)=>{if(q.url==='/api/state'){r.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});return r.end(JSON.stringify(state()));}r.writeHead(200,{'content-type':'text/html;charset=utf-8','cache-control':'no-store'});r.end(page);});
 
-function parseMessage(raw) {
-  let a;
-  try { a = JSON.parse(raw); } catch { errors++; return; }
-  lastMessageAt = now();
-  dataMessages++;
-  // Combined streams wrap payload as {stream,data}.
-  const payload = a && a.data !== undefined ? a.data : a;
-  const arr = Array.isArray(payload) ? payload : [payload];
-  let n = 0;
-  for (const x of arr) {
-    if (x && x.s && x.c) {
-      const sym = String(x.s).toUpperCase();
-      // The endpoint is already Binance USD-M Futures. If REST exchangeInfo
-      // was unavailable, discover USDT symbols directly from the live stream.
-      if (!symbols.has(sym) && sym.endsWith('USDT')) {
-        symbols.set(sym, { symbol: sym, status: 'TRADING', quoteAsset: 'USDT', contractType: 'PERPETUAL' });
-        if (!universeLoadedAt) universeLoadedAt = now();
-        if (universeSource === 'NONE') universeSource = 'LIVE_STREAM_DISCOVERY';
-      }
-      tick(sym, Number(x.c), Number(x.q || 0), Number(x.E || now()));
-      n++;
-    }
-  }
-  if (n) feedSince = feedSince || now();
+function parseMessage(raw){
+  let a;try{a=JSON.parse(raw);}catch{errors++;return;}
+  lastMessageAt=now();dataMessages++;
+  const payload=a&&a.data!==undefined?a.data:a;
+  const arr=Array.isArray(payload)?payload:[payload];
+  for(const x of arr){if(x&&x.s&&x.c)tick(String(x.s).toUpperCase(),Number(x.c),Number(x.q||0),Number(x.E||now()));}
+  if(arr.length)feedSince=feedSince||now();
 }
 
-function closeSocket() {
-  if (!ws) return;
-  try { ws.removeAllListeners(); ws.terminate(); } catch {}
-  ws = null;
+async function restPriceFallback(){
+  try{const d=await getJSON('https://fapi.binance.com/fapi/v1/ticker/price');const ts=now();let n=0;for(const x of d||[]){if(!x||!x.symbol||!x.price)continue;const sym=String(x.symbol).toUpperCase();if(symbols.has(sym)){tick(sym,Number(x.price),0,ts);n++;}}if(n)feedSince=feedSince||ts;}
+  catch(e){errors++;console.error('REST_FALLBACK_ERROR',e.message);}
 }
 
-function openWebSocket(url, mode, generation) {
-  try { ws = new WebSocket(url); }
-  catch (e) { errors++; console.error('WS_CREATE_ERROR', e.message); scheduleReconnect(generation); return; }
-
-  ws.on('open', () => {
-    if (generation !== wsGeneration) return;
-    connected = true;
-    feedMode = mode;
-    feedSince = now();
-    console.log(`WS_CONNECTED=1 mode=${mode}`);
-  });
-  ws.on('message', raw => { if (generation === wsGeneration) parseMessage(raw); });
-  ws.on('error', err => { errors++; console.error('WS_ERROR', err.message); });
-  ws.on('close', () => {
-    if (generation !== wsGeneration) return;
-    connected = false;
-    feedMode = 'RECONNECTING';
-    console.log('WS_CLOSED');
-    scheduleReconnect(generation);
-  });
-  setTimeout(() => {
-    if (generation !== wsGeneration) return;
-    if (!ticks.size) {
-      console.log('WS_WATCHDOG_NO_DATA=1');
-      reconnects++;
-      connectFeed(true);
-    }
-  }, FEED_TIMEOUT);
+function closeSocket(){
+  if(!ws) return;
+  const old=ws;
+  ws=null;
+  try{
+    // Never remove the error handler before terminating: ws can emit a
+    // late 'error' event during terminate(), which would crash Node.
+    old.on('error',()=>{});
+    old.terminate();
+  }catch{}
 }
+function scheduleReconnect(gen){if(gen!==wsGeneration)return;setTimeout(()=>{if(gen!==wsGeneration)return;reconnects++;connectFeed();},1500);}
+function connectFeed(){const gen=++wsGeneration;closeSocket();connected=false;feedMode='CONNECTING';const url='wss://fstream.binance.com/ws/!miniTicker@arr';try{ws=new WebSocket(url);}catch(e){errors++;scheduleReconnect(gen);return;}ws.on('open',()=>{if(gen!==wsGeneration)return;connected=true;feedMode='GLOBAL_MINITICKER';feedSince=now();});ws.on('message',raw=>{if(gen===wsGeneration)parseMessage(raw);});ws.on('error',e=>{errors++;console.error('WS_ERROR',e.message);});ws.on('close',()=>{if(gen!==wsGeneration)return;connected=false;feedMode='RECONNECTING';scheduleReconnect(gen);});}
 
-function connectFeed(forceGlobal = false) {
-  const generation = ++wsGeneration;
-  closeSocket();
-  connected = false;
-  feedMode = 'CONNECTING';
-
-  // Prefer the single global USD-M miniTicker stream. It avoids hundreds of
-  // individual subscriptions and minimizes client-side subscription traffic.
-  const globalUrl = 'wss://fstream.binance.com/ws/!miniTicker@arr';
-  const combinedUrl = 'wss://fstream.binance.com/stream?streams=!miniTicker@arr';
-  const url = forceGlobal ? globalUrl : globalUrl;
-  console.log('WS_CONNECT', url, 'mode=GLOBAL_MINITICKER');
-  openWebSocket(url, 'GLOBAL_MINITICKER', generation);
-}
-
-function scheduleReconnect(generation) {
-  if (generation !== wsGeneration) return;
-  setTimeout(() => {
-    if (generation !== wsGeneration) return;
-    reconnects++;
-    connectFeed(true);
-  }, 1500);
-}
-
-async function boot() {
-  try { await universe(); } catch (e) { errors++; console.error('UNIVERSE_ERROR', e.message); }
-  srv.listen(PORT, () => console.log('SUPREMO PAPER ENGINE PORT', PORT));
-  connectFeed();
-  setInterval(() => {
-    if (!connected || (lastDataAt && now()-lastDataAt > FEED_TIMEOUT)) {
-      console.log('FEED_WATCHDOG reconnect');
-      reconnects++;
-      connectFeed();
-    }
-  }, Math.max(2000, Math.floor(FEED_TIMEOUT/2)));
-  setInterval(scan, SCAN_MS);
-  setInterval(async () => {
-    try { await universe(); } catch (e) { errors++; console.error('UNIVERSE_REFRESH_ERROR', e.message); }
-  }, 15 * 60 * 1000);
-}
-
+async function boot(){try{await universe();}catch(e){errors++;console.error('UNIVERSE_ERROR',e.message);}srv.listen(PORT,()=>console.log('SUPREMO V8 PORT',PORT));connectFeed();setInterval(()=>{if(!connected||(lastDataAt&&now()-lastDataAt>FEED_TIMEOUT)){reconnects++;connectFeed();}},4000);setInterval(scan,250);setInterval(()=>{if(!lastDataAt||now()-lastDataAt>2500)restPriceFallback();},1000);setInterval(async()=>{try{await universe();}catch(e){errors++;}},15*60*1000);}
 boot();

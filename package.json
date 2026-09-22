@@ -1,7 +1,7 @@
 {
-  "name": "supremo-v4",
-  "version": "4.0.0",
+  "name": "supremo-v8",
+  "version": "8.0.0",
   "private": true,
-  "scripts": { "start": "node server.js", "check": "node --check server.js", "test": "node test-scanner.js" },
-  "dependencies": { "ws": "^8.18.3" }
+  "scripts": {"start":"node server.js","check":"node --check server.js","test":"node test-candle.js && node test-scanner.js && node test-ws-safety.js"},
+  "dependencies": {"ws":"^8.18.3"}
 }

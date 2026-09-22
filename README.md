@@ -1,20 +1,21 @@
-# SUPREMO V4 — Global Low-Latency Profit Engine PAPER
+# SUPREMO V8 — 30s Candle Trend PAPER
 
-PAPER-only Binance USD-M Futures scanner. No API keys and no real orders.
+Fix de estabilidad del WebSocket de V7. El cierre/reconexión ya no elimina el listener de `error` antes de `terminate()`, evitando el crash observado en Railway.
 
-## V4 changes
-- Single global `!miniTicker@arr` WebSocket feed first; avoids hundreds of individual subscriptions.
-- Automatic reconnect/watchdog when data stops.
-- Live-stream symbol discovery if REST `exchangeInfo` is unavailable.
-- Real data coverage shown as `ticks / markets`.
-- 250 ms local radar loop in RAM.
-- LONG/SHORT ranking using velocity, acceleration, persistence and exhaustion.
-- Net-edge gate includes fee + slippage assumptions.
-- Rotation/cooldown to reduce repeated symbols.
-- Paper TP/SL/timeout and PnL/drawdown statistics.
-- The engine does not claim profitability; PAPER results must establish whether a net edge exists.
+## Entrada
+- Vela de 30 segundos.
+- Verde = LONG.
+- Roja = SHORT.
+- Sin RSI, MACD, score, aceleración ni filtro de edge para decidir la entrada.
 
-## Railway
-Start command: `node server.js`
+## Feed
+- WebSocket público Binance USD-M.
+- Reconexión automática.
+- Fallback público de precios si no llegan datos.
+- PAPER solamente; no usa API keys ni envía órdenes reales.
 
-Do not add Binance API keys for this PAPER version.
+## Inicio
+`npm start`
+
+## Importante
+La estrategia de vela no garantiza utilidad. Debe validarse con PAPER antes de cualquier uso LIVE.
