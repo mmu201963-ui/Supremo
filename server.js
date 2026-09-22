@@ -197,34 +197,49 @@ function scan() {
   lastScanMs = performance.now() - st;
 }
 
-function state() {
-  let u=0;
+function positionSnapshot() {
+  const rows = [];
   for (const p of pos.values()) {
-    const t=ticks.get(p.symbol);
-    if (t) {
-      const d=p.side==='LONG'?1:-1;
-      u += p.margin*((t.price/p.entry-1)*d)*LEV;
-    }
+    const t = ticks.get(p.symbol);
+    if (!t) continue;
+    const d = p.side === 'LONG' ? 1 : -1;
+    const move = (t.price / p.entry - 1) * d;
+    const gross = p.margin * move * LEV;
+    const fees = p.margin * LEV * FEE * 2;
+    const slip = p.margin * LEV * SLIP * 2;
+    const net = gross - fees - slip;
+    rows.push({symbol:p.symbol,side:p.side,entry:p.entry,price:t.price,movePct:move*100,gross,fees,slip,net,openedAt:p.openedAt,ageMs:now()-p.openedAt,candleStart:p.candleStart});
   }
-  const liveEq=equity+u;
+  return rows;
+}
+
+function state() {
+  const livePositions = positionSnapshot();
+  const unrealized = livePositions.reduce((a,p)=>a+p.net,0);
+  const totalPnl = realized + unrealized;
+  const liveEquity = START + totalPnl;
+  peakEquity = Math.max(peakEquity, liveEquity);
+  maxDrawdown = Math.max(maxDrawdown, peakEquity - liveEquity);
+  const winners = livePositions.filter(p=>p.net>0).length;
+  const losers = livePositions.filter(p=>p.net<0).length;
   const coverage=symbols.size?ticks.size/symbols.size:0;
   const candleRows=[];
   for (const [s,c] of candles) {
     if (c.ticks < 2 || c.close===c.open) continue;
-    candleRows.push({symbol:s, side:c.close>c.open?'LONG':'SHORT', bodyPct:(c.close/c.open-1)*100, open:c.open, close:c.close, ticks:c.ticks});
+    candleRows.push({symbol:s,side:c.close>c.open?'LONG':'SHORT',bodyPct:(c.close/c.open-1)*100,open:c.open,close:c.close,ticks:c.ticks});
   }
   candleRows.sort((a,b)=>Math.abs(b.bodyPct)-Math.abs(a.bodyPct));
   return {
-    name:'SUPREMO',version:'9.0',mode:'PAPER',entryRule:'LAST_CLOSED_30S_CANDLE_DIRECTION_ONLY',markets:symbols.size,ticks:ticks.size,
+    name:'SUPREMO',version:'10.0',mode:'PAPER',entryRule:'LAST_CLOSED_30S_CANDLE_DIRECTION_ONLY',markets:symbols.size,ticks:ticks.size,
     coverage:+coverage.toFixed(4),coveragePct:+(coverage*100).toFixed(1),scanNo,lastScanMs:+lastScanMs.toFixed(3),connected,feedMode,
     feedHealthy:feedHealthy(),feedAgeMs:lastDataAt?now()-lastDataAt:null,dataMessages,dataUpdates,symbolsUpdatedThisCycle,
-    equity:+liveEq.toFixed(2),realized:+realized.toFixed(2),unrealized:+u.toFixed(2),positions:[...pos.values()],trades:trades.slice(-50).reverse(),
-    candleSignals:candleRows.slice(0,40),entries,errors,reconnects,maxDrawdown:+maxDrawdown.toFixed(2),universeSource,universeLoadedAt,firstDataAt
+    equity:+liveEquity.toFixed(2),realized:+realized.toFixed(2),unrealized:+unrealized.toFixed(2),totalPnl:+totalPnl.toFixed(2),
+    positions:livePositions,trades:trades.slice(-50).reverse(),candleSignals:candleRows.slice(0,40),entries,errors,reconnects,
+    winners,losers,maxDrawdown:+maxDrawdown.toFixed(2),universeSource,universeLoadedAt,firstDataAt
   };
 }
 
-const page=`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SUPREMO V9 — Closed 30s Candle Trend PAPER</title><style>body{font-family:Arial;background:#070b11;color:#eaf0f8;padding:18px;margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.c,.p{background:#111a25;border:1px solid #263448;border-radius:12px;padding:14px;margin-bottom:12px}.b{font-size:24px;font-weight:bold;margin-top:4px}.m{color:#92a1b6;font-size:12px;line-height:1.5}.ok{color:#55e6a5}.bad{color:#ff7184}.warn{color:#ffd166}table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:7px;border-bottom:1px solid #223044;text-align:right}td:first-child,th:first-child{text-align:left}.scroll{overflow:auto;max-height:430px}</style></head><body><h2>SUPREMO V9 — CLOSED 30s CANDLE TREND ENGINE</h2><div class=m>Binance USD-M público · PAPER · sin API keys · sin órdenes reales</div><div id=status class="p warn">Inicializando feed...</div><div class=grid><div class=c>Mercados<div id=m class=b>—</div></div><div class=c>Datos<div id=t class=b>—</div><div id=cov class=m>—</div></div><div class=c>Scan #<div id=n class=b>—</div></div><div class=c>Equity<div id=e class=b>—</div></div><div class=c>PnL<div id=p class=b>—</div></div><div class=c>Posiciones<div id=o class=b>—</div></div><div class=c>Entradas<div id=en class=b>—</div></div><div class=c>Feed<div id=w class=b>—</div></div></div><div class=p><b>REGLA DE ENTRADA</b><div class=m>ÚNICA SEÑAL: ÚLTIMA vela de 30 segundos CERRADA. Verde = LONG. Roja = SHORT. La vela en formación no genera entradas. Sin score, RSI, momentum, edge ni indicadores externos.</div></div><div class=p><b>VELAS ACTIVAS</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>CUERPO %</th><th>OPEN</th><th>CLOSE</th><th>TICKS</th></tr></thead><tbody id=s></tbody></table></div></div><div class=p><b>TRADES PAPER</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>NETO</th><th>MOTIVO</th><th>TIEMPO</th></tr></thead><tbody id=r></tbody></table></div></div><div class=p><b>DIAGNÓSTICO</b><div id=d class=m>—</div></div><script>const $=id=>document.getElementById(id);async function u(){try{const x=await fetch('/api/state',{cache:'no-store'}).then(r=>r.json());$('m').textContent=x.markets;$('t').textContent=x.ticks;$('cov').textContent=x.coveragePct+'% cobertura real';$('n').textContent=x.scanNo;$('e').textContent='$'+x.equity.toFixed(2);$('p').textContent='$'+x.realized.toFixed(2);$('o').textContent=x.positions.length;$('en').textContent=x.entries;$('w').textContent=x.feedHealthy?'OK':'WAIT';$('w').className='b '+(x.feedHealthy?'ok':'bad');$('status').className='p '+(x.feedHealthy?'ok':'warn');$('status').textContent=x.feedHealthy?('FEED OK · '+x.ticks+'/'+x.markets+' mercados con datos · '+x.feedMode):('ESPERANDO FEED · WS '+(x.connected?'conectado':'desconectado')+' · datos '+x.ticks+'/'+x.markets);$('s').innerHTML=x.candleSignals.map(a=>'<tr><td>'+a.symbol+'</td><td class='+(a.side==='LONG'?'ok':'bad')+'>'+a.side+'</td><td>'+a.bodyPct.toFixed(4)+'</td><td>'+a.open+'</td><td>'+a.close+'</td><td>'+a.ticks+'</td></tr>').join('');$('r').innerHTML=x.trades.map(a=>'<tr><td>'+a.symbol+'</td><td>'+a.side+'</td><td class='+(a.net>=0?'ok':'bad')+'>'+a.net.toFixed(2)+'</td><td>'+a.reason+'</td><td>'+Math.round(a.heldMs/1000)+'s</td></tr>').join('');$('d').textContent='updates='+x.dataUpdates+' · actualizados/ciclo='+x.symbolsUpdatedThisCycle+' · edad feed='+(x.feedAgeMs??'-')+'ms · reconexiones='+x.reconnects+' · errores='+x.errors+' · fuente='+x.universeSource+' · drawdown máx=$'+x.maxDrawdown.toFixed(2)}catch(e){$('status').textContent='ERROR UI: '+e.message}}setInterval(u,500);u()</script></body></html>`;
-
+const page=`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SUPREMO V10 — Real-Time PnL PAPER</title><style>body{font-family:Arial;background:#070b11;color:#eaf0f8;padding:18px;margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.c,.p{background:#111a25;border:1px solid #263448;border-radius:12px;padding:14px;margin-bottom:12px}.b{font-size:24px;font-weight:bold;margin-top:4px}.m{color:#92a1b6;font-size:12px;line-height:1.5}.ok{color:#55e6a5}.bad{color:#ff7184}.warn{color:#ffd166}table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:7px;border-bottom:1px solid #223044;text-align:right}td:first-child,th:first-child{text-align:left}.scroll{overflow:auto;max-height:430px}</style></head><body><h2>SUPREMO V10 — REAL-TIME PnL · CLOSED 30s CANDLE</h2><div class=m>Binance USD-M público · PAPER · sin API keys · sin órdenes reales</div><div id=status class="p warn">Inicializando feed...</div><div class=grid><div class=c>Mercados<div id=m class=b>—</div></div><div class=c>Datos<div id=t class=b>—</div><div id=cov class=m>—</div></div><div class=c>Scan #<div id=n class=b>—</div></div><div class=c>Equity total<div id=e class=b>—</div></div><div class=c>PnL TOTAL<div id=p class=b>—</div></div><div class=c>Realizado<div id=pr class=b>—</div></div><div class=c>Flotante neto<div id=pu class=b>—</div></div><div class=c>Posiciones<div id=o class=b>—</div><div id=wl class=m>—</div></div><div class=c>Entradas<div id=en class=b>—</div></div><div class=c>Feed<div id=w class=b>—</div></div></div><div class=p><b>REGLA DE ENTRADA</b><div class=m>ÚNICA SEÑAL: ÚLTIMA vela de 30 segundos CERRADA. Verde = LONG. Roja = SHORT. La vela en formación no genera entradas. Sin score, RSI, momentum, edge ni indicadores externos.</div></div><div class=p><b>POSICIONES EN TIEMPO REAL</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>ENTRADA</th><th>PRECIO</th><th>MOV %</th><th>PNL NETO</th><th>EDAD</th></tr></thead><tbody id=op></tbody></table></div></div><div class=p><b>VELAS ACTIVAS</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>CUERPO %</th><th>OPEN</th><th>CLOSE</th><th>TICKS</th></tr></thead><tbody id=s></tbody></table></div></div><div class=p><b>TRADES PAPER CERRADOS</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>NETO</th><th>MOTIVO</th><th>TIEMPO</th></tr></thead><tbody id=r></tbody></table></div></div><div class=p><b>DIAGNÓSTICO</b><div id=d class=m>—</div></div><script>const $=id=>document.getElementById(id);const money=v=>'$'+Number(v).toFixed(2);async function u(){try{const x=await fetch('/api/state',{cache:'no-store'}).then(r=>r.json());$('m').textContent=x.markets;$('t').textContent=x.ticks;$('cov').textContent=x.coveragePct+'% cobertura real';$('n').textContent=x.scanNo;$('e').textContent=money(x.equity);$('p').textContent=money(x.totalPnl);$('p').className='b '+(x.totalPnl>=0?'ok':'bad');$('pr').textContent=money(x.realized);$('pr').className='b '+(x.realized>=0?'ok':'bad');$('pu').textContent=money(x.unrealized);$('pu').className='b '+(x.unrealized>=0?'ok':'bad');$('o').textContent=x.positions.length;$('wl').textContent='ganadoras '+x.winners+' · perdedoras '+x.losers;$('en').textContent=x.entries;$('w').textContent=x.feedHealthy?'OK':'WAIT';$('w').className='b '+(x.feedHealthy?'ok':'bad');$('status').className='p '+(x.feedHealthy?'ok':'warn');$('status').textContent=x.feedHealthy?('FEED OK · '+x.ticks+'/'+x.markets+' mercados con datos · '+x.feedMode):('ESPERANDO FEED · WS '+(x.connected?'conectado':'desconectado')+' · datos '+x.ticks+'/'+x.markets);$('op').innerHTML=x.positions.map(a=>'<tr><td>'+a.symbol+'</td><td class='+(a.side==='LONG'?'ok':'bad')+'>'+a.side+'</td><td>'+a.entry+'</td><td>'+a.price+'</td><td class='+(a.movePct>=0?'ok':'bad')+'>'+a.movePct.toFixed(4)+'</td><td class='+(a.net>=0?'ok':'bad')+'>'+a.net.toFixed(2)+'</td><td>'+Math.round(a.ageMs/1000)+'s</td></tr>').join('');$('s').innerHTML=x.candleSignals.map(a=>'<tr><td>'+a.symbol+'</td><td class='+(a.side==='LONG'?'ok':'bad')+'>'+a.side+'</td><td>'+a.bodyPct.toFixed(4)+'</td><td>'+a.open+'</td><td>'+a.close+'</td><td>'+a.ticks+'</td></tr>').join('');$('r').innerHTML=x.trades.map(a=>'<tr><td>'+a.symbol+'</td><td>'+a.side+'</td><td class='+(a.net>=0?'ok':'bad')+'>'+a.net.toFixed(2)+'</td><td>'+a.reason+'</td><td>'+Math.round(a.heldMs/1000)+'s</td></tr>').join('');$('d').textContent='updates='+x.dataUpdates+' · actualizados/ciclo='+x.symbolsUpdatedThisCycle+' · edad feed='+(x.feedAgeMs??'-')+'ms · reconexiones='+x.reconnects+' · errores='+x.errors+' · fuente='+x.universeSource+' · drawdown máx='+money(x.maxDrawdown)}catch(e){$('status').textContent='ERROR UI: '+e.message}}setInterval(u,500);u()</script></body></html>`;
 const srv=http.createServer((q,r)=>{if(q.url==='/api/state'){r.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});return r.end(JSON.stringify(state()));}r.writeHead(200,{'content-type':'text/html;charset=utf-8','cache-control':'no-store'});r.end(page);});
 
 function parseMessage(raw){

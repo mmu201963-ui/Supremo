@@ -1,7 +1,10 @@
-# SUPREMO V9
+# SUPREMO V10
 
-PAPER-only Binance USD-M scanner. Entry uses only the **last CLOSED 30-second candle**: green = LONG, red = SHORT. The current forming candle is never used for entry. No RSI, MACD, momentum score, edge model, or external trend indicators.
+PAPER scanner for Binance USD-M public market data.
 
-The change is intentional: V7/V8 could enter while the 30s candle was still forming, so a candle that looked green could reverse before close. V9 waits for the candle to close, enters once per symbol per closed candle, and manages positions with TP/SL/time only.
+## V10 change
+The dashboard now calculates live total PnL as realized PnL plus the current unrealized net PnL of open positions. Unrealized PnL includes estimated round-trip fees and slippage. Equity is START + total PnL and updates with each state refresh. Each open position shows entry, live price, movement, net PnL and age.
 
-No Binance API keys are required for PAPER.
+Entry rule remains the last CLOSED 30-second candle direction only: green = LONG, red = SHORT. No RSI, MACD, score, momentum or edge filter.
+
+PAPER only; no Binance API keys required.
