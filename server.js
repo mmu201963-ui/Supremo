@@ -20,6 +20,7 @@ const now = () => Date.now();
 let symbols = new Map();
 let ticks = new Map();
 let candles = new Map();
+let lastClosedCandle = new Map();
 let lastEntryCandle = new Map();
 let pos = new Map();
 let trades = [];
@@ -97,6 +98,11 @@ function tick(s, p, v, ts) {
 function candleSignal(s) {
   const c = candles.get(s);
   if (!c || c.ticks < 2 || c.close === c.open) return null;
+  // IMPORTANT: decide only from a CLOSED 30-second candle.
+  // The current candle is never used as an entry signal.
+  if (c.start + CANDLE_MS > now()) return null;
+  if (lastClosedCandle.get(s) === c.start) return null;
+  lastClosedCandle.set(s, c.start);
   return {
     symbol:s,
     side:c.close > c.open ? 'LONG' : 'SHORT',
@@ -164,11 +170,8 @@ function manage() {
     if (!t) continue;
     const d = p.side === 'LONG' ? 1 : -1;
     const move = (t.price / p.entry - 1) * d;
-    const c = candles.get(p.symbol);
-    const candleReversed = c && c.close !== c.open && ((p.side === 'LONG' && c.close < c.open) || (p.side === 'SHORT' && c.close > c.open));
     if (move >= TP) closePosition(p, t.price, 'TP');
     else if (move <= -SL) closePosition(p, t.price, 'SL');
-    else if (candleReversed && c.start > p.candleStart) closePosition(p, t.price, 'CANDLE_REVERSAL');
     else if (now() - p.openedAt >= HOLD) closePosition(p, t.price, 'TIME');
   }
 }
@@ -182,9 +185,9 @@ function scan() {
   symbolsUpdatedThisCycle=updated;
 
   if (feedHealthy()) {
-    // ENTRY RULE: ONLY THE CURRENT 30-SECOND CANDLE DIRECTION.
-    // Green candle = LONG. Red candle = SHORT. No score, momentum, RSI,
-    // trend thresholds or edge variables are used for the entry decision.
+    // ENTRY RULE: ONLY THE LAST CLOSED 30-SECOND CANDLE DIRECTION.
+    // Green closed candle = LONG. Red closed candle = SHORT. No score, RSI,
+    // momentum, edge or external indicators are used for the entry decision.
     for (const [s, t] of ticks) {
       if (pos.size >= MAX_POS) break;
       const signal = candleSignal(s);
@@ -212,7 +215,7 @@ function state() {
   }
   candleRows.sort((a,b)=>Math.abs(b.bodyPct)-Math.abs(a.bodyPct));
   return {
-    name:'SUPREMO',version:'7.0',mode:'PAPER',entryRule:'30S_CANDLE_DIRECTION_ONLY',markets:symbols.size,ticks:ticks.size,
+    name:'SUPREMO',version:'9.0',mode:'PAPER',entryRule:'LAST_CLOSED_30S_CANDLE_DIRECTION_ONLY',markets:symbols.size,ticks:ticks.size,
     coverage:+coverage.toFixed(4),coveragePct:+(coverage*100).toFixed(1),scanNo,lastScanMs:+lastScanMs.toFixed(3),connected,feedMode,
     feedHealthy:feedHealthy(),feedAgeMs:lastDataAt?now()-lastDataAt:null,dataMessages,dataUpdates,symbolsUpdatedThisCycle,
     equity:+liveEq.toFixed(2),realized:+realized.toFixed(2),unrealized:+u.toFixed(2),positions:[...pos.values()],trades:trades.slice(-50).reverse(),
@@ -220,7 +223,7 @@ function state() {
   };
 }
 
-const page=`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SUPREMO V7 — 30s Candle Trend PAPER</title><style>body{font-family:Arial;background:#070b11;color:#eaf0f8;padding:18px;margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.c,.p{background:#111a25;border:1px solid #263448;border-radius:12px;padding:14px;margin-bottom:12px}.b{font-size:24px;font-weight:bold;margin-top:4px}.m{color:#92a1b6;font-size:12px;line-height:1.5}.ok{color:#55e6a5}.bad{color:#ff7184}.warn{color:#ffd166}table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:7px;border-bottom:1px solid #223044;text-align:right}td:first-child,th:first-child{text-align:left}.scroll{overflow:auto;max-height:430px}</style></head><body><h2>SUPREMO V7 — 30s CANDLE TREND ENGINE</h2><div class=m>Binance USD-M público · PAPER · sin API keys · sin órdenes reales</div><div id=status class="p warn">Inicializando feed...</div><div class=grid><div class=c>Mercados<div id=m class=b>—</div></div><div class=c>Datos<div id=t class=b>—</div><div id=cov class=m>—</div></div><div class=c>Scan #<div id=n class=b>—</div></div><div class=c>Equity<div id=e class=b>—</div></div><div class=c>PnL<div id=p class=b>—</div></div><div class=c>Posiciones<div id=o class=b>—</div></div><div class=c>Entradas<div id=en class=b>—</div></div><div class=c>Feed<div id=w class=b>—</div></div></div><div class=p><b>REGLA DE ENTRADA</b><div class=m>ÚNICA SEÑAL: vela de 30 segundos. Vela verde = LONG. Vela roja = SHORT. Sin score, RSI, momentum, edge ni filtros de tendencia.</div></div><div class=p><b>VELAS ACTIVAS</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>CUERPO %</th><th>OPEN</th><th>CLOSE</th><th>TICKS</th></tr></thead><tbody id=s></tbody></table></div></div><div class=p><b>TRADES PAPER</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>NETO</th><th>MOTIVO</th><th>TIEMPO</th></tr></thead><tbody id=r></tbody></table></div></div><div class=p><b>DIAGNÓSTICO</b><div id=d class=m>—</div></div><script>const $=id=>document.getElementById(id);async function u(){try{const x=await fetch('/api/state',{cache:'no-store'}).then(r=>r.json());$('m').textContent=x.markets;$('t').textContent=x.ticks;$('cov').textContent=x.coveragePct+'% cobertura real';$('n').textContent=x.scanNo;$('e').textContent='$'+x.equity.toFixed(2);$('p').textContent='$'+x.realized.toFixed(2);$('o').textContent=x.positions.length;$('en').textContent=x.entries;$('w').textContent=x.feedHealthy?'OK':'WAIT';$('w').className='b '+(x.feedHealthy?'ok':'bad');$('status').className='p '+(x.feedHealthy?'ok':'warn');$('status').textContent=x.feedHealthy?('FEED OK · '+x.ticks+'/'+x.markets+' mercados con datos · '+x.feedMode):('ESPERANDO FEED · WS '+(x.connected?'conectado':'desconectado')+' · datos '+x.ticks+'/'+x.markets);$('s').innerHTML=x.candleSignals.map(a=>'<tr><td>'+a.symbol+'</td><td class='+(a.side==='LONG'?'ok':'bad')+'>'+a.side+'</td><td>'+a.bodyPct.toFixed(4)+'</td><td>'+a.open+'</td><td>'+a.close+'</td><td>'+a.ticks+'</td></tr>').join('');$('r').innerHTML=x.trades.map(a=>'<tr><td>'+a.symbol+'</td><td>'+a.side+'</td><td class='+(a.net>=0?'ok':'bad')+'>'+a.net.toFixed(2)+'</td><td>'+a.reason+'</td><td>'+Math.round(a.heldMs/1000)+'s</td></tr>').join('');$('d').textContent='updates='+x.dataUpdates+' · actualizados/ciclo='+x.symbolsUpdatedThisCycle+' · edad feed='+(x.feedAgeMs??'-')+'ms · reconexiones='+x.reconnects+' · errores='+x.errors+' · fuente='+x.universeSource+' · drawdown máx=$'+x.maxDrawdown.toFixed(2)}catch(e){$('status').textContent='ERROR UI: '+e.message}}setInterval(u,500);u()</script></body></html>`;
+const page=`<!doctype html><html lang="es"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>SUPREMO V9 — Closed 30s Candle Trend PAPER</title><style>body{font-family:Arial;background:#070b11;color:#eaf0f8;padding:18px;margin:0}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(145px,1fr));gap:10px}.c,.p{background:#111a25;border:1px solid #263448;border-radius:12px;padding:14px;margin-bottom:12px}.b{font-size:24px;font-weight:bold;margin-top:4px}.m{color:#92a1b6;font-size:12px;line-height:1.5}.ok{color:#55e6a5}.bad{color:#ff7184}.warn{color:#ffd166}table{width:100%;border-collapse:collapse;font-size:12px}td,th{padding:7px;border-bottom:1px solid #223044;text-align:right}td:first-child,th:first-child{text-align:left}.scroll{overflow:auto;max-height:430px}</style></head><body><h2>SUPREMO V9 — CLOSED 30s CANDLE TREND ENGINE</h2><div class=m>Binance USD-M público · PAPER · sin API keys · sin órdenes reales</div><div id=status class="p warn">Inicializando feed...</div><div class=grid><div class=c>Mercados<div id=m class=b>—</div></div><div class=c>Datos<div id=t class=b>—</div><div id=cov class=m>—</div></div><div class=c>Scan #<div id=n class=b>—</div></div><div class=c>Equity<div id=e class=b>—</div></div><div class=c>PnL<div id=p class=b>—</div></div><div class=c>Posiciones<div id=o class=b>—</div></div><div class=c>Entradas<div id=en class=b>—</div></div><div class=c>Feed<div id=w class=b>—</div></div></div><div class=p><b>REGLA DE ENTRADA</b><div class=m>ÚNICA SEÑAL: ÚLTIMA vela de 30 segundos CERRADA. Verde = LONG. Roja = SHORT. La vela en formación no genera entradas. Sin score, RSI, momentum, edge ni indicadores externos.</div></div><div class=p><b>VELAS ACTIVAS</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>CUERPO %</th><th>OPEN</th><th>CLOSE</th><th>TICKS</th></tr></thead><tbody id=s></tbody></table></div></div><div class=p><b>TRADES PAPER</b><div class=scroll><table><thead><tr><th>PAR</th><th>LADO</th><th>NETO</th><th>MOTIVO</th><th>TIEMPO</th></tr></thead><tbody id=r></tbody></table></div></div><div class=p><b>DIAGNÓSTICO</b><div id=d class=m>—</div></div><script>const $=id=>document.getElementById(id);async function u(){try{const x=await fetch('/api/state',{cache:'no-store'}).then(r=>r.json());$('m').textContent=x.markets;$('t').textContent=x.ticks;$('cov').textContent=x.coveragePct+'% cobertura real';$('n').textContent=x.scanNo;$('e').textContent='$'+x.equity.toFixed(2);$('p').textContent='$'+x.realized.toFixed(2);$('o').textContent=x.positions.length;$('en').textContent=x.entries;$('w').textContent=x.feedHealthy?'OK':'WAIT';$('w').className='b '+(x.feedHealthy?'ok':'bad');$('status').className='p '+(x.feedHealthy?'ok':'warn');$('status').textContent=x.feedHealthy?('FEED OK · '+x.ticks+'/'+x.markets+' mercados con datos · '+x.feedMode):('ESPERANDO FEED · WS '+(x.connected?'conectado':'desconectado')+' · datos '+x.ticks+'/'+x.markets);$('s').innerHTML=x.candleSignals.map(a=>'<tr><td>'+a.symbol+'</td><td class='+(a.side==='LONG'?'ok':'bad')+'>'+a.side+'</td><td>'+a.bodyPct.toFixed(4)+'</td><td>'+a.open+'</td><td>'+a.close+'</td><td>'+a.ticks+'</td></tr>').join('');$('r').innerHTML=x.trades.map(a=>'<tr><td>'+a.symbol+'</td><td>'+a.side+'</td><td class='+(a.net>=0?'ok':'bad')+'>'+a.net.toFixed(2)+'</td><td>'+a.reason+'</td><td>'+Math.round(a.heldMs/1000)+'s</td></tr>').join('');$('d').textContent='updates='+x.dataUpdates+' · actualizados/ciclo='+x.symbolsUpdatedThisCycle+' · edad feed='+(x.feedAgeMs??'-')+'ms · reconexiones='+x.reconnects+' · errores='+x.errors+' · fuente='+x.universeSource+' · drawdown máx=$'+x.maxDrawdown.toFixed(2)}catch(e){$('status').textContent='ERROR UI: '+e.message}}setInterval(u,500);u()</script></body></html>`;
 
 const srv=http.createServer((q,r)=>{if(q.url==='/api/state'){r.writeHead(200,{'content-type':'application/json','cache-control':'no-store'});return r.end(JSON.stringify(state()));}r.writeHead(200,{'content-type':'text/html;charset=utf-8','cache-control':'no-store'});r.end(page);});
 

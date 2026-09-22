@@ -1,21 +1,7 @@
-# SUPREMO V8 — 30s Candle Trend PAPER
+# SUPREMO V9
 
-Fix de estabilidad del WebSocket de V7. El cierre/reconexión ya no elimina el listener de `error` antes de `terminate()`, evitando el crash observado en Railway.
+PAPER-only Binance USD-M scanner. Entry uses only the **last CLOSED 30-second candle**: green = LONG, red = SHORT. The current forming candle is never used for entry. No RSI, MACD, momentum score, edge model, or external trend indicators.
 
-## Entrada
-- Vela de 30 segundos.
-- Verde = LONG.
-- Roja = SHORT.
-- Sin RSI, MACD, score, aceleración ni filtro de edge para decidir la entrada.
+The change is intentional: V7/V8 could enter while the 30s candle was still forming, so a candle that looked green could reverse before close. V9 waits for the candle to close, enters once per symbol per closed candle, and manages positions with TP/SL/time only.
 
-## Feed
-- WebSocket público Binance USD-M.
-- Reconexión automática.
-- Fallback público de precios si no llegan datos.
-- PAPER solamente; no usa API keys ni envía órdenes reales.
-
-## Inicio
-`npm start`
-
-## Importante
-La estrategia de vela no garantiza utilidad. Debe validarse con PAPER antes de cualquier uso LIVE.
+No Binance API keys are required for PAPER.
