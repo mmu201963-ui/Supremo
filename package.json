@@ -1,10 +1,11 @@
 {
-  "name": "galaxi-global-scanner-paper",
-  "version": "1.0.0",
+  "name": "supremo-global-profit-engine-paper",
+  "version": "2.0.0",
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "check": "node --check server.js"
+    "check": "node --check server.js",
+    "test": "node test-scanner.js"
   },
   "dependencies": {
     "ws": "^8.18.3"
