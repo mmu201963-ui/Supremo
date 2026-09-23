@@ -1,15 +1,15 @@
 const express = require("express");
-
 const app = express();
 const PORT = Number(process.env.PORT || 3000);
 
 const CFG = {
   symbols: ["BTCUSDT", "ETHUSDT"],
   interval: "4h",
-  limit: 120,
+  limit: 150,
   rsiPeriod: 14,
   bbPeriod: 20,
   bbStd: 2,
+  sellRsi: Number(process.env.SELL_RSI || 60),
   initialCapital: Number(process.env.INITIAL_CAPITAL || 10000),
   positionPct: Math.min(Math.max(Number(process.env.POSITION_PCT || 0.05), 0), 0.05),
   stopPct: Math.min(Math.max(Number(process.env.STOP_PCT || 0.04), 0.03), 0.05),
@@ -43,98 +43,106 @@ function addEvent(type, symbol, data) {
 function sma(values, period) {
   if (values.length < period) return null;
   var a = values.slice(-period);
-  return a.reduce(function(sum, x) { return sum + x; }, 0) / period;
+  return a.reduce(function(s, v) { return s + v; }, 0) / period;
 }
 
-function stddev(values, period) {
+function stdev(values, period) {
   if (values.length < period) return null;
   var a = values.slice(-period);
-  var mean = a.reduce(function(sum, x) { return sum + x; }, 0) / period;
-  var variance = a.reduce(function(sum, x) {
-    return sum + Math.pow(x - mean, 2);
-  }, 0) / period;
-  return Math.sqrt(variance);
+  var m = sma(values, period);
+  return Math.sqrt(a.reduce(function(s, v) {
+    return s + Math.pow(v - m, 2);
+  }, 0) / period);
 }
 
-function calcRsi(closes, period) {
-  if (closes.length <= period) return null;
-  var gain = 0;
-  var loss = 0;
+// Wilder RSI
+function wilderRsi(closes, period) {
+  if (closes.length < period + 1) return null;
 
-  for (var i = closes.length - period; i < closes.length; i++) {
+  var gain = 0, loss = 0;
+  for (var i = 1; i <= period; i++) {
     var d = closes[i] - closes[i - 1];
     if (d > 0) gain += d;
     else loss -= d;
   }
 
-  if (loss === 0) return 100;
-  var rs = (gain / period) / (loss / period);
+  var avgGain = gain / period;
+  var avgLoss = loss / period;
+
+  for (var j = period + 1; j < closes.length; j++) {
+    var diff = closes[j] - closes[j - 1];
+    var g = diff > 0 ? diff : 0;
+    var l = diff < 0 ? -diff : 0;
+    avgGain = ((avgGain * (period - 1)) + g) / period;
+    avgLoss = ((avgLoss * (period - 1)) + l) / period;
+  }
+
+  if (avgLoss === 0) return 100;
+  var rs = avgGain / avgLoss;
   return 100 - (100 / (1 + rs));
 }
 
-function fetchJson(url) {
+async function fetchJson(url) {
   var controller = new AbortController();
   var timer = setTimeout(function() { controller.abort(); }, CFG.timeoutMs);
 
-  return fetch(url, {
-    headers: { "User-Agent": "SUPREMO-MeanReversion/1.2" },
-    signal: controller.signal
-  })
-  .then(function(response) {
-    return response.text().then(function(body) {
-      if (!response.ok) {
-        throw new Error("HTTP " + response.status + ": " + body.slice(0, 180));
-      }
-      return JSON.parse(body);
+  try {
+    var r = await fetch(url, {
+      headers: { "User-Agent": "SUPREMO-MeanReversion/1.3.1" },
+      signal: controller.signal
     });
-  })
-  .finally(function() {
+    var body = await r.text();
+    if (!r.ok) throw new Error("HTTP " + r.status + ": " + body.slice(0, 160));
+    return JSON.parse(body);
+  } finally {
     clearTimeout(timer);
-  });
+  }
 }
 
-function getKlines(symbol) {
+async function binance(path) {
   var urls = [
-    "https://fapi.binance.com/fapi/v1/klines?symbol=" + symbol + "&interval=" + CFG.interval + "&limit=" + CFG.limit,
-    "https://api.binance.com/api/v3/klines?symbol=" + symbol + "&interval=" + CFG.interval + "&limit=" + CFG.limit
+    "https://fapi.binance.com" + path,
+    "https://api.binance.com" + path
   ];
+  var last = null;
 
-  var lastError = null;
-
-  function tryNext(index) {
-    if (index >= urls.length) {
-      return Promise.reject(lastError || new Error("No se pudo obtener Binance"));
+  for (var i = 0; i < urls.length; i++) {
+    try {
+      return await fetchJson(urls[i]);
+    } catch (e) {
+      last = e;
     }
-    return fetchJson(urls[index]).then(function(data) {
-      if (!Array.isArray(data) || data.length < CFG.bbPeriod + CFG.rsiPeriod + 2) {
-        throw new Error("Binance devolvió datos insuficientes");
-      }
-      return data;
-    }).catch(function(error) {
-      lastError = error;
-      return tryNext(index + 1);
-    });
   }
-
-  return tryNext(0);
+  throw last || new Error("Binance unavailable");
 }
 
-function getIndicators(klines) {
-  var closed = klines.slice(0, -1);
-  if (closed.length < CFG.bbPeriod + CFG.rsiPeriod) {
-    throw new Error("No hay suficientes velas cerradas");
+async function getData(symbol) {
+  var klines = await binance(
+    "/fapi/v1/klines?symbol=" + symbol +
+    "&interval=4h&limit=" + CFG.limit
+  );
+
+  if (!Array.isArray(klines) ||
+      klines.length < CFG.bbPeriod + CFG.rsiPeriod + 3) {
+    throw new Error("Insufficient candles");
   }
 
+  // Indicators from the last CLOSED 4H candle.
+  var closed = klines.slice(0, -1);
   var closes = closed.map(function(k) { return Number(k[4]); });
-  var price = closes[closes.length - 1];
+
   var middle = sma(closes, CFG.bbPeriod);
-  var sd = stddev(closes, CFG.bbPeriod);
+  var sd = stdev(closes, CFG.bbPeriod);
   var lower = middle - CFG.bbStd * sd;
   var upper = middle + CFG.bbStd * sd;
-  var rsi = calcRsi(closes, CFG.rsiPeriod);
+  var rsi = wilderRsi(closes, CFG.rsiPeriod);
+
+  // Current market price, separate from the closed-candle indicators.
+  var ticker = await binance("/fapi/v1/ticker/price?symbol=" + symbol);
+  var price = Number(ticker.price);
 
   if (![price, middle, lower, upper, rsi].every(Number.isFinite)) {
-    throw new Error("Indicadores inválidos");
+    throw new Error("Invalid indicator data");
   }
 
   return {
@@ -143,32 +151,43 @@ function getIndicators(klines) {
     upper: upper,
     middle: middle,
     lower: lower,
+    distanceLowerPct: ((price / lower) - 1) * 100,
+    distanceMiddlePct: ((price / middle) - 1) * 100,
     candleTime: new Date(Number(closed[closed.length - 1][6])).toISOString()
   };
 }
 
 function getSignal(x, position) {
+  var buy = x.rsi < 30 && x.price <= x.lower;
+  var sell = x.rsi > CFG.sellRsi || x.price >= x.middle;
+
   if (position) {
-    if (x.rsi > 60 || x.price >= x.middle) return "SELL";
+    if (sell) return "SELL";
     if (x.price <= position.stop) return "STOP";
     return "HOLD";
   }
 
-  if (x.rsi < 30 && x.price <= x.lower) return "BUY";
+  if (buy) return "BUY";
+  if (sell) return "OVERBOUGHT";
   return "WAIT";
 }
 
-function scan() {
+async function scan() {
   state.status = "SCANNING";
 
-  return Promise.all(CFG.symbols.map(function(symbol) {
-    return getKlines(symbol).then(function(klines) {
-      var x = getIndicators(klines);
+  for (var i = 0; i < CFG.symbols.length; i++) {
+    var symbol = CFG.symbols[i];
+
+    try {
+      var x = await getData(symbol);
       var position = state.positions[symbol];
       var signal = getSignal(x, position);
 
       if (!position && signal === "BUY") {
-        var allocation = Math.min(state.cash, state.equity * CFG.positionPct);
+        var allocation = Math.min(
+          state.cash,
+          state.equity * CFG.positionPct
+        );
 
         if (allocation > 0) {
           var qty = allocation / x.price;
@@ -202,13 +221,17 @@ function scan() {
         state.cash += position.allocation + pnl;
         state.realizedPnl += pnl;
 
-        addEvent(signal === "STOP" ? "PAPER_STOP" : "PAPER_EXIT", symbol, {
-          entry: position.entry,
-          exit: exit,
-          pnl: pnl,
-          rsi: x.rsi,
-          middle: x.middle
-        });
+        addEvent(
+          signal === "STOP" ? "PAPER_STOP" : "PAPER_EXIT",
+          symbol,
+          {
+            entry: position.entry,
+            exit: exit,
+            pnl: pnl,
+            rsi: x.rsi,
+            middle: x.middle
+          }
+        );
 
         delete state.positions[symbol];
       }
@@ -217,35 +240,32 @@ function scan() {
         signal: signal,
         position: state.positions[symbol] || null
       });
-    }).catch(function(error) {
+    } catch (e) {
       state.market[symbol] = {
-        error: error.message,
+        error: e.message,
         signal: "ERROR"
       };
-      addEvent("DATA_ERROR", symbol, { message: error.message });
-    });
-  })).then(function() {
-    state.floatingPnl = Object.keys(state.positions).reduce(function(sum, symbol) {
-      var position = state.positions[symbol];
-      var market = state.market[symbol];
-      if (!market || !Number.isFinite(market.price)) return sum;
-      return sum + ((market.price - position.entry) * position.qty);
-    }, 0);
+      addEvent("DATA_ERROR", symbol, { message: e.message });
+    }
+  }
 
-    state.equity =
-      state.cash +
-      Object.keys(state.positions).reduce(function(sum, symbol) {
-        return sum + state.positions[symbol].allocation;
-      }, 0) +
-      state.floatingPnl;
+  state.floatingPnl = Object.keys(state.positions).reduce(function(sum, symbol) {
+    var p = state.positions[symbol];
+    var m = state.market[symbol];
+    if (!m || !Number.isFinite(m.price)) return sum;
+    return sum + ((m.price - p.entry) * p.qty);
+  }, 0);
 
-    state.scans += 1;
-    state.lastScan = new Date().toISOString();
-    state.status = "PAPER_RUNNING";
-  }).catch(function(error) {
-    state.status = "PAPER_RUNNING";
-    addEvent("SCAN_ERROR", null, { message: error.message });
-  });
+  state.equity =
+    state.cash +
+    Object.keys(state.positions).reduce(function(sum, symbol) {
+      return sum + state.positions[symbol].allocation;
+    }, 0) +
+    state.floatingPnl;
+
+  state.scans += 1;
+  state.lastScan = new Date().toISOString();
+  state.status = "PAPER_RUNNING";
 }
 
 app.get("/health", function(_req, res) {
@@ -261,26 +281,24 @@ app.get("/status", function(_req, res) {
 });
 
 app.get("/", function(_req, res) {
-  res.status(200).sendFile(__dirname + "/index.html");
+  res.sendFile(__dirname + "/index.html");
 });
 
 app.listen(PORT, "0.0.0.0", function() {
-  console.log("SUPREMO PAPER listening on 0.0.0.0:" + PORT);
-  scan();
+  console.log("SUPREMO Mean Reversion V3.1 listening on " + PORT);
+  scan().catch(function(e) {
+    addEvent("SCAN_ERROR", null, { message: e.message });
+  });
   setInterval(function() {
-    scan();
+    scan().catch(function(e) {
+      addEvent("SCAN_ERROR", null, { message: e.message });
+    });
   }, CFG.pollMs);
 });
 
-process.on("uncaughtException", function(error) {
-  console.error("UNCAUGHT_EXCEPTION", error);
-  addEvent("PROCESS_ERROR", null, {
-    message: error.message,
-    stack: error.stack
-  });
+process.on("uncaughtException", function(e) {
+  console.error("UNCAUGHT_EXCEPTION", e);
 });
-
-process.on("unhandledRejection", function(error) {
-  console.error("UNHANDLED_REJECTION", error);
-  addEvent("PROCESS_ERROR", null, { message: String(error) });
+process.on("unhandledRejection", function(e) {
+  console.error("UNHANDLED_REJECTION", e);
 });

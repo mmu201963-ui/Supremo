@@ -1,26 +1,19 @@
-# SUPREMO Mean Reversion 4H — FINAL
+# SUPREMO Mean Reversion 4H V3.1
 
-Versión corregida para Railway.
+Esta versión corrige el problema conceptual de la pantalla anterior.
 
-La anterior falló con `SyntaxError: missing ) after argument list`. Esta versión:
-- usa CommonJS (`require`) en lugar de ESM;
-- separa el HTML de `server.js`;
-- escucha en `0.0.0.0` y usa `PORT`;
-- incluye `/health`;
-- no necesita API keys;
-- es PAPER;
-- intenta Binance Futures USD-M y luego Spot;
-- usa la última vela 4H cerrada;
-- BUY: RSI(14) < 30 y precio <= Bollinger inferior;
-- SELL: RSI(14) > 60 o precio >= SMA20;
-- stop configurable 3–5%, por defecto 4%;
-- máximo 5% del capital por posición.
+Cambios:
+- RSI estándar de Wilder(14), no un promedio simple.
+- Precio actual separado de los indicadores 4H.
+- RSI y Bollinger se calculan con la última vela 4H cerrada para evitar señales que cambien mientras la vela está abierta.
+- El precio usado para comprobar las reglas es el ticker actual de Binance.
+- La pantalla muestra ambos mercados: BTCUSDT y ETHUSDT.
+- Si RSI > 60 o precio >= SMA20 y no hay posición, muestra `CONDICIÓN DE VENTA · SIN POSICIÓN` en vez de esconder la condición como WAIT.
+- Si hay posición y se cumple la salida, muestra `SEÑAL DE VENTA` y cierra en PAPER.
+- Compra solamente cuando RSI < 30 Y precio actual <= BB inferior.
+- Stop 4% por defecto; configurable 3–5%.
+- Máximo 5% del capital por posición.
+- PAPER: no coloca órdenes reales y no necesita API keys.
 
 Railway:
-1. Reemplaza el contenido del servicio por este ZIP.
-2. El Start Command debe ser `npm start`.
-3. No agregues API keys.
-4. Espera a que el deployment quede `Success`.
-5. Abre la URL pública.
-
-El sistema no garantiza beneficios y esta estrategia puede fallar en tendencias fuertes.
+Start Command: npm start
