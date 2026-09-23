@@ -1,19 +1,10 @@
-# SUPREMO Mean Reversion 4H V3.1
+# SUPREMO V10
 
-Esta versión corrige el problema conceptual de la pantalla anterior.
+PAPER scanner for Binance USD-M public market data.
 
-Cambios:
-- RSI estándar de Wilder(14), no un promedio simple.
-- Precio actual separado de los indicadores 4H.
-- RSI y Bollinger se calculan con la última vela 4H cerrada para evitar señales que cambien mientras la vela está abierta.
-- El precio usado para comprobar las reglas es el ticker actual de Binance.
-- La pantalla muestra ambos mercados: BTCUSDT y ETHUSDT.
-- Si RSI > 60 o precio >= SMA20 y no hay posición, muestra `CONDICIÓN DE VENTA · SIN POSICIÓN` en vez de esconder la condición como WAIT.
-- Si hay posición y se cumple la salida, muestra `SEÑAL DE VENTA` y cierra en PAPER.
-- Compra solamente cuando RSI < 30 Y precio actual <= BB inferior.
-- Stop 4% por defecto; configurable 3–5%.
-- Máximo 5% del capital por posición.
-- PAPER: no coloca órdenes reales y no necesita API keys.
+## V10 change
+The dashboard now calculates live total PnL as realized PnL plus the current unrealized net PnL of open positions. Unrealized PnL includes estimated round-trip fees and slippage. Equity is START + total PnL and updates with each state refresh. Each open position shows entry, live price, movement, net PnL and age.
 
-Railway:
-Start Command: npm start
+Entry rule remains the last CLOSED 30-second candle direction only: green = LONG, red = SHORT. No RSI, MACD, score, momentum or edge filter.
+
+PAPER only; no Binance API keys required.
