@@ -1,10 +1,23 @@
-# SUPREMO V10
+# SUPREMO V12 ADAPTIVE REGIME
 
-PAPER scanner for Binance USD-M public market data.
+PAPER only. No Binance API keys required.
 
-## V10 change
-The dashboard now calculates live total PnL as realized PnL plus the current unrealized net PnL of open positions. Unrealized PnL includes estimated round-trip fees and slippage. Equity is START + total PnL and updates with each state refresh. Each open position shows entry, live price, movement, net PnL and age.
+Objetivo:
+- No intentar invertir señales.
+- Determinar régimen BULL / BEAR / RANGE / VOLATILE.
+- Buscar LONG en BULL y SHORT en BEAR.
+- No operar en VOLATILE.
+- No llenar posiciones por obligación.
+- Máximo físico 4 posiciones.
+- Máximo 1 entrada por ciclo.
+- Score mínimo 8.
+- Riesgo máximo 2% de equity por posición.
+- Cooldown 45 minutos por símbolo.
+- Gestión por ATR con TP/SL y salida por cambio de régimen.
+- Escanea todos los perpetuos USD-M USDT disponibles.
 
-Entry rule remains the last CLOSED 30-second candle direction only: green = LONG, red = SHORT. No RSI, MACD, score, momentum or edge filter.
+Railway:
+Start Command: npm start
 
-PAPER only; no Binance API keys required.
+IMPORTANTE:
+Esta versión no garantiza beneficios. Es una arquitectura de prueba PAPER para medir si el filtro de régimen y la selección de entradas mejora el V11.
