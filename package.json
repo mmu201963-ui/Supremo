@@ -1,7 +1,1 @@
-{
-  "name":"supremo-v12-adaptive-regime",
-  "version":"12.0.0",
-  "private":true,
-  "scripts":{"start":"node server.js"},
-  "dependencies":{"express":"^4.21.2"}
-}
+{"name":"supremo-v13","version":"13.0.0","private":true,"scripts":{"start":"node server.js"},"dependencies":{"express":"^4.21.2"}}
