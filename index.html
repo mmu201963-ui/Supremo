@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>SUPREMO Mean Reversion 4H</title>
+<style>
+body{font-family:-apple-system,BlinkMacSystemFont,Segoe UI,Arial,sans-serif;background:#0b1017;color:#e8eef7;margin:0;padding:22px}
+.card{background:#111923;border:1px solid #263342;border-radius:14px;padding:16px;margin:12px 0}
+.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:12px}
+.good{color:#4ade80}.warn{color:#fbbf24}.bad{color:#fb7185}small{color:#94a3b8}
+</style>
+</head>
+<body>
+<h1>SUPREMO · Mean Reversion 4H</h1>
+<div class="card"><b>PAPER</b> · BTC/USDT + ETH/USDT · 4H · RSI(14) · Bollinger(20,2)<br>
+BUY: RSI &lt; 30 y precio ≤ banda inferior · SELL: RSI &gt; 60 o precio ≥ SMA20 · Stop 4%
+</div>
+<div id="app">Cargando…</div>
+<script>
+function esc(v){
+  return String(v).replace(/&/g,"&amp;").replace(/</g,"&lt;").replace(/>/g,"&gt;");
+}
+async function load(){
+  try{
+    const response=await fetch("/status",{cache:"no-store"});
+    const s=await response.json();
+    let html="<div class='grid'>";
+    for(const symbol of Object.keys(s.market||{})){
+      const x=s.market[symbol];
+      if(x.error){
+        html+="<div class='card'><h2>"+esc(symbol)+"</h2><p class='bad'>"+esc(x.error)+"</p></div>";
+        continue;
+      }
+      const cls=x.signal==="BUY"?"good":((x.signal==="SELL"||x.signal==="STOP")?"bad":"warn");
+      html+="<div class='card'><h2>"+esc(symbol)+"</h2>"+
+        "<p><b>Precio:</b> "+x.price.toFixed(2)+"</p>"+
+        "<p><b>RSI(14):</b> "+x.rsi.toFixed(2)+"</p>"+
+        "<p><b>BB superior:</b> "+x.upper.toFixed(2)+"</p>"+
+        "<p><b>BB media:</b> "+x.middle.toFixed(2)+"</p>"+
+        "<p><b>BB inferior:</b> "+x.lower.toFixed(2)+"</p>"+
+        "<p><b>Señal:</b> <span class='"+cls+"'>"+esc(x.signal)+"</span></p>"+
+        "<p><small>Vela cerrada: "+esc(x.candleTime)+"</small></p>"+
+        (x.position ? "<p>Entrada "+x.position.entry.toFixed(2)+" · Stop "+x.position.stop.toFixed(2)+"</p>" : "")+
+        "</div>";
+    }
+    html+="</div>";
+    html+="<div class='card'><b>Estado:</b> "+esc(s.status)+
+      " · <b>Equity:</b> "+Number(s.equity).toFixed(2)+
+      " · <b>Realizado:</b> "+Number(s.realizedPnl).toFixed(2)+
+      " · <b>Flotante:</b> "+Number(s.floatingPnl).toFixed(2)+
+      "<br><small>Scans: "+s.scans+" · "+esc(s.lastScan||"")+"</small></div>";
+    document.getElementById("app").innerHTML=html;
+  }catch(error){
+    document.getElementById("app").innerHTML="<div class='card bad'>No se pudo leer /status: "+esc(error.message)+"</div>";
+  }
+}
+load();
+setInterval(load,5000);
+</script>
+</body>
+</html>
