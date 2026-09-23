@@ -1,1 +1,12 @@
-{"name":"supremo-v9","version":"9.0.0","private":true,"scripts":{"start":"node server.js","check":"node --check server.js","test":"node test-candle.js && node test-scanner.js"},"dependencies":{"ws":"^8.18.3"}}
+{
+  "name": "supremo-mean-reversion-4h",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "node server.js"
+  },
+  "dependencies": {
+    "express": "^4.21.2"
+  }
+}
